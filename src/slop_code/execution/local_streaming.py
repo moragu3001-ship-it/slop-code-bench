@@ -192,7 +192,9 @@ class LocalStreamingRuntime(StreamingRuntime):
         )
 
         stream = self._create_demuxed_stream(proc)
-        result = yield from process_stream(stream, timeout, self.poll)
+        result = yield from process_stream(
+            stream, timeout, self.poll, wait_fn=self._wait_for_process
+        )
 
         # Kill process if it timed out
         if result.timed_out:
@@ -227,6 +229,31 @@ class LocalStreamingRuntime(StreamingRuntime):
         if self._proc is None:
             return None
         return self._proc.poll()
+
+    def _wait_for_process(self, timeout: float | None) -> int | None:
+        """Deterministically reap the local child (EXP-001 R2).
+
+        Blocking wait bounded by the stream's remaining budget.
+        Returns the true exit status, or None on budget expiry.
+        """
+        import subprocess as _subprocess
+
+        proc = self._proc
+        if proc is None:
+            return None
+        if timeout is None:
+            try:
+                return proc.wait(timeout=None)
+            except Exception:
+                return proc.poll()
+        if timeout <= 0:
+            return proc.poll()
+        try:
+            return proc.wait(timeout=timeout)
+        except _subprocess.TimeoutExpired:
+            return None
+        except Exception:
+            return proc.poll()
 
     def kill(self) -> None:
         """Kill the running process."""

@@ -89,6 +89,7 @@ def process_stream(
     timeout: float | None,
     poll_fn: Callable[[], int | None],
     yield_only_after: str | None = None,
+    wait_fn: Callable[[float | None], int | None] | None = None,
 ) -> Generator[RuntimeEvent, None, RuntimeResult]:
     logger.debug("Starting to consume events with timeout", timeout=timeout)
     start_time = time.monotonic()
@@ -188,7 +189,52 @@ def process_stream(
     stop_event.set()
     thread.join()
 
-    exit_code = exit_code or poll_fn()
+    # Deterministic finalization (EXP-001 R2): pipe EOF must NOT become
+    # a false -1 merely because the child has not been reaped yet on
+    # Windows. The actual child-process exit status is authoritative.
+    if exit_code is not None:
+        # Process already observed exited during streaming (handles 0
+        # correctly: explicit None check, never `or`).
+        pass
+    elif timed_out:
+        # Already out of budget: single non-blocking poll only.
+        exit_code = poll_fn()
+        if exit_code is None:
+            exit_code = -1
+    else:
+        remaining = timeout_fn()
+        if remaining <= 0:
+            timed_out = True
+            exit_code = poll_fn()
+            if exit_code is None:
+                exit_code = -1
+        elif wait_fn is not None:
+            try:
+                waited = wait_fn(max(0.0, remaining))
+            except Exception:
+                waited = None
+            if waited is not None:
+                exit_code = waited
+            else:
+                # Re-check once: process may have exited just as the
+                # wait budget expired.
+                exit_code = poll_fn()
+                if exit_code is None:
+                    timed_out = True
+                    exit_code = -1
+        else:
+            # Generic bounded reap without a blocking wait primitive:
+            # poll until the process exits or the overall deadline
+            # expires. No busy loop, no infinite wait, no fixed delay.
+            exit_code = poll_fn()
+            while exit_code is None:
+                remaining = timeout_fn()
+                if remaining <= 0:
+                    timed_out = True
+                    exit_code = -1
+                    break
+                time.sleep(min(0.02, remaining))
+                exit_code = poll_fn()
     if exit_code is None:
         exit_code = -1
     logger.debug(

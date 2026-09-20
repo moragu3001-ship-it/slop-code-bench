@@ -436,6 +436,7 @@ class DockerStreamingRuntime(StreamingRuntime):
             timeout,
             lambda: self.poll(),
             yield_only_after=SPLIT_STRING if not self._disable_setup else None,
+            wait_fn=self._wait_for_exec,
         )
 
         if result.timed_out:
@@ -475,6 +476,37 @@ class DockerStreamingRuntime(StreamingRuntime):
         self._exit_code = exit_code
         logger.debug("docker exec finished", exit_code=exit_code, verbose=True)
         return exit_code
+
+    def _wait_for_exec(self, timeout: float | None) -> int | None:
+        """Deterministically reap the docker-exec child (EXP-001 R2).
+
+        Blocking wait bounded by the stream's remaining budget. Returns
+        the true exit status, or None if the budget expires first.
+        Never synthesizes -1: unknown state stays None so the caller
+        can apply timeout semantics.
+        """
+        proc = self._active_exec_process
+        if proc is None:
+            return self._exit_code
+        if timeout is None:
+            try:
+                code = proc.wait(timeout=None)
+            except Exception:
+                return proc.poll()
+            self._active_exec_process = None
+            self._exit_code = code
+            return code
+        if timeout <= 0:
+            return proc.poll()
+        try:
+            code = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return None
+        except Exception:
+            return proc.poll()
+        self._active_exec_process = None
+        self._exit_code = code
+        return code
 
     def kill(self) -> None:
         """Kill the running container."""
