@@ -349,6 +349,71 @@ class TestDockerExecRuntimeBuildDockerRunCommand:
             assert not (tmp_path / HANDLE_ENTRY_NAME).exists()
 
 
+class TestDockerExecRuntimeContainerWorkdirPosix:
+    """Windows regression: container workdir must keep POSIX semantics.
+
+    On a Windows host, ``str(Path("/workspace"))`` yields ``\\workspace``,
+    which the Docker daemon rejects (exit 125). These tests prove the
+    Docker CLI receives exactly ``/workspace`` on this host.
+    """
+
+    def _make_runtime(
+        self, docker_spec: DockerEnvironmentSpec, tmp_path: Path
+    ) -> DockerExecRuntime:
+        with patch("slop_code.execution.docker_runtime.exec.docker"):
+            return DockerExecRuntime(
+                spec=docker_spec,
+                working_dir=tmp_path,
+                command="echo test",
+                static_assets={},
+                is_evaluation=False,
+                ports={},
+                mounts={},
+                env_vars={},
+                setup_command=None,
+            )
+
+    def test_container_workdir_is_posix(
+        self, docker_spec: DockerEnvironmentSpec, tmp_path: Path
+    ) -> None:
+        """_container_workdir() == "/workspace" on a Windows host."""
+        runtime = self._make_runtime(docker_spec, tmp_path)
+        assert runtime._container_workdir() == "/workspace"
+
+    def test_container_workdir_has_no_backslash(
+        self, docker_spec: DockerEnvironmentSpec, tmp_path: Path
+    ) -> None:
+        """Container workdir never contains a Windows separator."""
+        runtime = self._make_runtime(docker_spec, tmp_path)
+        assert "\\" not in runtime._container_workdir()
+
+    def test_docker_run_workdir_arg_is_exactly_posix(
+        self, docker_spec: DockerEnvironmentSpec, tmp_path: Path
+    ) -> None:
+        """Docker CLI receives exactly /workspace via --workdir."""
+        runtime = self._make_runtime(docker_spec, tmp_path)
+        args = runtime._build_docker_run_command({})
+        assert "--workdir" in args
+        workdir_idx = args.index("--workdir")
+        assert args[workdir_idx + 1] == "/workspace"
+
+    def test_custom_container_workdir_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        """A non-default POSIX workdir survives unchanged."""
+        spec = DockerEnvironmentSpec(
+            type="docker",
+            name="test-docker-custom-workdir",
+            commands=CommandConfig(command="python"),
+            docker=DockerConfig(
+                image="python:3.12-slim",
+                workdir="/app/work",
+            ),
+        )
+        runtime = self._make_runtime(spec, tmp_path)
+        assert runtime._container_workdir() == "/app/work"
+
+
 class TestDockerExecRuntimeUser:
     """Tests for user property."""
 

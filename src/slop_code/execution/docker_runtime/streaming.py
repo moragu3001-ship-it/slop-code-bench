@@ -12,6 +12,7 @@ import subprocess
 import threading
 from collections.abc import Iterator
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 import docker
@@ -129,8 +130,13 @@ class DockerStreamingRuntime(StreamingRuntime):
         return commands
 
     def _container_workdir(self) -> str:
-        """Get the working directory path inside the container."""
-        return str(Path(self.spec.docker.workdir))
+        """Get the working directory path inside the container.
+
+        Container paths always use POSIX semantics, even when the host
+        OS is Windows. ``str(Path(...))`` would render ``/workspace``
+        as ``\\workspace`` on Windows, which the Docker daemon rejects.
+        """
+        return PurePosixPath(self.spec.docker.workdir).as_posix()
 
     def _merge_env(self, env: dict[str, str]) -> dict[str, str]:
         """Merge environment variables with instance env_vars."""
